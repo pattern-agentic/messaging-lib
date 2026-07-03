@@ -30,6 +30,8 @@ class PASlimConfig:
     audit_nats_url: Optional[str] = None
     audit_nats_subject_prefix: str = "pa.audit.messages"
     audit_nats_creds_file: Optional[str] = None
+    resubscribe_enabled: bool = True
+    resubscribe_interval_sec: float = 60.0
 
     def with_no_auth(self) -> PASlimConfig:
         self.auth_type = "none"

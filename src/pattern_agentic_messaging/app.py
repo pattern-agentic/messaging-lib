@@ -138,6 +138,8 @@ class PASlimApp:
         self._running = True
         self.session_token_verifier = None
         self._audit_publisher = None
+        self._client_config = None
+        self._maintain_task = None
 
     async def __aenter__(self):
         auth_type = self.config.auth_type
@@ -191,6 +193,7 @@ class PASlimApp:
             tls=tls,
             headers=self.config.custom_headers,
         )
+        self._client_config = client_config
         logger.info(f"SLIM __aenter__: connecting to endpoint={self.config.endpoint}")
         conn_id = await service.connect_async(client_config)
         logger.info(f"SLIM __aenter__: connected conn_id={conn_id}")
@@ -222,9 +225,43 @@ class PASlimApp:
                 logger.warning(f"Audit publisher init failed (audit disabled): {e}")
                 self._audit_publisher = None
 
+        if self.config.resubscribe_enabled:
+            self._maintain_task = asyncio.create_task(self._maintain_subscription())
+
         return self
 
+    async def _maintain_subscription(self):
+        local_name = parse_name(self.config.local_name)
+        while True:
+            try:
+                await asyncio.sleep(self.config.resubscribe_interval_sec)
+                await self._app.subscribe_async(local_name, self._conn_id)
+                logger.debug("SLIM maintain: re-subscribed inbound route")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"SLIM maintain: re-subscribe failed ({e}); reconnecting")
+                try:
+                    try:
+                        self._service.disconnect(self._conn_id)
+                    except Exception:
+                        pass
+                    conn_id = await self._service.connect_async(self._client_config)
+                    await self._app.subscribe_async(local_name, conn_id)
+                    self._conn_id = conn_id
+                    logger.info(f"SLIM maintain: reconnected + re-subscribed conn_id={conn_id}")
+                except Exception as e2:
+                    logger.error(f"SLIM maintain: reconnect failed: {e2}")
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self._maintain_task:
+            self._maintain_task.cancel()
+            try:
+                await self._maintain_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._maintain_task = None
+
         if self._audit_publisher:
             try:
                 await self._audit_publisher.close()
